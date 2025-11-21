@@ -35,6 +35,9 @@ public:
     void setLogFile(const std::string& path);
     const std::string& getLogFile() const { return logFilePath; }
 
+    // 设置最大文件大小（字节），超过则轮转
+    void setMaxFileSize(size_t bytes) { maxFileSize = bytes; }
+
     static const char* levelToStr(LogLevel level);
 
     ~LogM();
@@ -44,9 +47,15 @@ private:
     LogM(const LogM&) = delete;
     LogM& operator=(const LogM&) = delete;
 
+    // 轮转检查（在持锁状态下调用）
+    void rotateIfNeeded(std::time_t now_c);
+
     std::atomic<LogLevel> currentLevel; // 原子，避免竞态
     std::string logFilePath;
     std::mutex logMutex; // 保护文件写
+
+    size_t maxFileSize;          // 触发轮转的大小
+    std::time_t fileStartTime;   // 当前文件开始时间
 };
 
 // -----------------------------------------------------------------------------
@@ -63,11 +72,12 @@ private:
             } else if (_n >= (int)sizeof(_buff)) {                                   \
                 /* 截断标记 */                                                      \
                 const char* suffix = "...(truncated)";                              \
-                size_t len = sizeof(_buff) - 1;                                      \
-                size_t sLen = std::strlen(suffix);                                   \
-                if (len > sLen) {                                                    \
-                    std::memcpy(_buff + len - sLen - 1, suffix, sLen);               \
-                    _buff[len] = '\0';                                              \
+                size_t keep = sizeof(_buff) - std::strlen(suffix) - 1;               \
+                if (keep > 0) {                                                      \
+                    _buff[keep] = '\0';                                             \
+                    std::strcat(_buff, suffix);                                      \
+                } else {                                                             \
+                    std::snprintf(_buff, sizeof(_buff), "%s", suffix);             \
                 }                                                                    \
             }                                                                        \
             _lg.log(level, __FILE__, __LINE__, __func__, _buff);                     \
