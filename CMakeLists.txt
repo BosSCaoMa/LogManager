@@ -18,9 +18,12 @@ file(GLOB_RECURSE LOGM_SOURCES CONFIGURE_DEPENDS
     ${PROJECT_SOURCE_DIR}/src/*.c
 )
 
-add_executable(LogM ${LOGM_SOURCES})
+# 添加 main.cpp（位于项目根目录）
+add_executable(LogM ${PROJECT_SOURCE_DIR}/main.cpp ${LOGM_SOURCES})
 
 # 头文件目录
+# include_directories(${PROJECT_SOURCE_DIR}/src)  # 旧方式
+# 使用目标私有包含目录
 target_include_directories(LogM PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
 # 编译警告/严格性
