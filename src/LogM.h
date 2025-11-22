@@ -1,3 +1,13 @@
+#ifdef _WIN32
+    #ifdef LOGM_EXPORTS
+        #define LOGM_API __declspec(dllexport)
+    #else
+        #define LOGM_API __declspec(dllimport)
+    #endif
+#else
+    #define LOGM_API
+#endif
+
 #ifndef LOGM_H
 #define LOGM_H
 
@@ -15,7 +25,8 @@ enum LogLevel {
     ERROR = 3
 };
 
-class LogM {
+// 添加 LOGM_API 导出类符号
+class LOGM_API LogM {
 public:
     static LogM& getInstance();
 
@@ -70,7 +81,6 @@ private:
             if (_n < 0) {                                                            \
                 std::snprintf(_buff, sizeof(_buff), "<format error>");             \
             } else if (_n >= (int)sizeof(_buff)) {                                   \
-                /* 截断标记 */                                                      \
                 const char* suffix = "...(truncated)";                              \
                 size_t keep = sizeof(_buff) - std::strlen(suffix) - 1;               \
                 if (keep > 0) {                                                      \

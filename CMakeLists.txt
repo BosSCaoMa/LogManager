@@ -18,17 +18,23 @@ file(GLOB_RECURSE LOGM_SOURCES CONFIGURE_DEPENDS
     ${PROJECT_SOURCE_DIR}/src/*.c
 )
 
-# 添加 main.cpp（位于项目根目录）
-add_executable(LogM ${PROJECT_SOURCE_DIR}/main.cpp ${LOGM_SOURCES})
+# 生成动态库 (共享库)
+add_library(LogM SHARED ${LOGM_SOURCES})
 
-# 头文件目录
-# include_directories(${PROJECT_SOURCE_DIR}/src)  # 旧方式
-# 使用目标私有包含目录
-target_include_directories(LogM PRIVATE ${PROJECT_SOURCE_DIR}/src)
+# 仅构建期头文件搜索路径
+ target_include_directories(LogM PUBLIC ${PROJECT_SOURCE_DIR}/src)
 
-# 编译警告/严格性
+# 让 MSVC 编译时导出符号（生成 .lib 所需）
 if(MSVC)
     target_compile_options(LogM PRIVATE /W4 /permissive- /EHsc)
+    target_compile_definitions(LogM PRIVATE LOGM_EXPORTS)
 else()
     target_compile_options(LogM PRIVATE -Wall -Wextra -Wpedantic)
+    # 如需隐藏未标记符号再加: -fvisibility=hidden 并在头文件导出接口
 endif()
+
+# 如不需要版本信息可删除下面两行
+set_target_properties(LogM PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+)
