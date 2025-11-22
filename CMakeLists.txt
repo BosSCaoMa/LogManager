@@ -18,17 +18,42 @@ file(GLOB_RECURSE LOGM_SOURCES CONFIGURE_DEPENDS
     ${PROJECT_SOURCE_DIR}/src/*.c
 )
 
-# 添加 main.cpp（位于项目根目录）
-add_executable(LogM ${PROJECT_SOURCE_DIR}/main.cpp ${LOGM_SOURCES})
+# 生成动态库 (共享库)
+add_library(LogM SHARED ${LOGM_SOURCES})
 
-# 头文件目录
-# include_directories(${PROJECT_SOURCE_DIR}/src)  # 旧方式
-# 使用目标私有包含目录
-target_include_directories(LogM PRIVATE ${PROJECT_SOURCE_DIR}/src)
+# 先引入安装目录变量
+include(GNUInstallDirs)
+
+# 头文件目录（区分构建与安装阶段，避免导出绝对源码路径）
+target_include_directories(LogM
+    PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/LogM>
+)
 
 # 编译警告/严格性
 if(MSVC)
     target_compile_options(LogM PRIVATE /W4 /permissive- /EHsc)
+    target_compile_definitions(LogM PRIVATE LOGM_EXPORTS)
 else()
-    target_compile_options(LogM PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(LogM PRIVATE -Wall -Wextra -Wpedantic -fvisibility=hidden)
 endif()
+
+# 可选：设置版本属性（Linux/Unix 有效）
+set_target_properties(LogM PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+)
+
+# 安装规则
+install(TARGETS LogM
+    EXPORT LogMTargets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/LogM
+)
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/src/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/LogM FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
+
+# 导出配置（find_package 支持）
+install(EXPORT LogMTargets FILE LogMTargets.cmake NAMESPACE LogM:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/LogM)
