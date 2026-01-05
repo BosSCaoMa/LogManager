@@ -31,7 +31,7 @@ LogM &LogM::getInstance() {
 }
 
 LogM::LogM() :
-    currentLevel(DEBUG),
+    currentLevel(LogLevel::DEBUG),
     maxFileSize(5 * 1024 * 1024), // 默认 5MB
     fileStartTime(std::time(nullptr)) {
 #ifdef _WIN32
@@ -64,10 +64,10 @@ void LogM::setLogFile(const std::string& path) {
 }
 
 const char* LogM::levelToStr(LogLevel level) {
-    if (level == DEBUG) return "DEBUG";
-    if (level == INFO)  return "INFO";
-    if (level == WARN)  return "WARN";
-    if (level == ERROR) return "ERROR";
+    if (level == LogLevel::DEBUG) return "DEBUG";
+    if (level == LogLevel::INFO)  return "INFO";
+    if (level == LogLevel::WARN)  return "WARN";
+    if (level == LogLevel::ERROR) return "ERROR";
     return "UNKNOWN";
 }
 

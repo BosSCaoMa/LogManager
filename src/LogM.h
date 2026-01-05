@@ -18,7 +18,7 @@
 #include <thread>
 
 // 日志级别
-enum LogLevel {
+enum class LogLevel {
     DEBUG = 0,
     INFO = 1,
     WARN = 2,
@@ -94,9 +94,9 @@ private:
         }                                                                            \
     } while (0)
 
-#define LOG_DEBUG(fmt, ...) LOG_BASE(DEBUG, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...)  LOG_BASE(INFO,  fmt, ##__VA_ARGS__)
-#define LOG_WARN(fmt, ...)  LOG_BASE(WARN,  fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) LOG_BASE(ERROR, fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...) LOG_BASE(LogLevel::DEBUG, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  LOG_BASE(LogLevel::INFO,  fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)  LOG_BASE(LogLevel::WARN,  fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) LOG_BASE(LogLevel::ERROR, fmt, ##__VA_ARGS__)
 
 #endif // LOGM_H
