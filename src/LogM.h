@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <mutex>
 #include <atomic>
+#include <type_traits>
 #include <thread>
 
 // 日志级别
@@ -24,6 +25,27 @@ enum class LogLevel {
     WARN = 2,
     ERROR = 3
 };
+
+// 让 std::atomic<LogLevel> 可用
+namespace std {
+    template<>
+    struct atomic<LogLevel> : atomic<int> {
+        atomic() noexcept : atomic<int>(static_cast<int>(LogLevel::DEBUG)) {}
+        atomic(LogLevel v) noexcept : atomic<int>(static_cast<int>(v)) {}
+        LogLevel load(memory_order order = memory_order_seq_cst) const noexcept {
+            return static_cast<LogLevel>(atomic<int>::load(order));
+        }
+        void store(LogLevel v, memory_order order = memory_order_seq_cst) noexcept {
+            atomic<int>::store(static_cast<int>(v), order);
+        }
+        bool compare_exchange_strong(LogLevel& expected, LogLevel desired, memory_order order = memory_order_seq_cst) noexcept {
+            int e = static_cast<int>(expected);
+            bool res = atomic<int>::compare_exchange_strong(e, static_cast<int>(desired), order);
+            expected = static_cast<LogLevel>(e);
+            return res;
+        }
+    };
+}
 
 // 添加 LOGM_API 导出类符号
 class LOGM_API LogM {
