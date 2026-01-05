@@ -23,7 +23,7 @@ enum class LogLevel {
     DEBUG = 0,
     INFO = 1,
     WARN = 2,
-    ERROR = 3
+    LOG_ERROR = 3
 };
 
 // 让 std::atomic<LogLevel> 可用

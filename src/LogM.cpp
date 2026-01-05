@@ -67,7 +67,7 @@ const char* LogM::levelToStr(LogLevel level) {
     if (level == LogLevel::DEBUG) return "DEBUG";
     if (level == LogLevel::INFO)  return "INFO";
     if (level == LogLevel::WARN)  return "WARN";
-    if (level == LogLevel::ERROR) return "ERROR";
+    if (level == LogLevel::LOG_ERROR) return "ERROR";
     return "UNKNOWN";
 }
 
