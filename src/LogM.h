@@ -19,10 +19,10 @@
 
 // 日志级别
 enum LogLevel {
-    DEBUG = 0,
-    INFO = 1,
-    WARN = 2,
-    ERROR = 3
+    LOGM_DEBUG = 0,
+    LOGM_INFO = 1,
+    LOGM_WARN = 2,
+    LOGM_ERROR = 3
 };
 
 // 添加 LOGM_API 导出类符号
@@ -94,9 +94,9 @@ private:
         }                                                                            \
     } while (0)
 
-#define LOG_DEBUG(fmt, ...) LOG_BASE(DEBUG, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...)  LOG_BASE(INFO,  fmt, ##__VA_ARGS__)
-#define LOG_WARN(fmt, ...)  LOG_BASE(WARN,  fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) LOG_BASE(ERROR, fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...) LOG_BASE(LOGM_DEBUG, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  LOG_BASE(LOGM_INFO,  fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)  LOG_BASE(LOGM_WARN,  fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) LOG_BASE(LOGM_ERROR, fmt, ##__VA_ARGS__)
 
 #endif // LOGM_H
