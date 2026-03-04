@@ -16,6 +16,7 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <condition_variable>
@@ -72,6 +73,10 @@ public:
     // 设置最大文件大小（字节），超过则轮转
     void setMaxFileSize(size_t bytes) { maxFileSize = bytes; }
 
+    // 统计信息
+    uint64_t getAcceptedCount() const { return acceptedCount.load(std::memory_order_relaxed); }
+    uint64_t getDroppedCount() const { return droppedCount.load(std::memory_order_relaxed); }
+
     static const char* levelToStr(LogLevel level);
 
     ~LogM();
@@ -99,6 +104,25 @@ private:
     struct Slot {
         std::atomic<bool> ready{false};
         std::string data;
+
+        Slot() = default;
+        Slot(const Slot&) = delete;
+        Slot& operator=(const Slot&) = delete;
+
+        Slot(Slot&& other) noexcept
+            : ready(other.ready.load(std::memory_order_relaxed)),
+              data(std::move(other.data)) {
+            other.ready.store(false, std::memory_order_relaxed);
+        }
+
+        Slot& operator=(Slot&& other) noexcept {
+            if (this != &other) {
+                ready.store(other.ready.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                data = std::move(other.data);
+                other.ready.store(false, std::memory_order_relaxed);
+            }
+            return *this;
+        }
     };
     std::vector<Slot> ring;
     size_t capacityMask; // 容量为 2^n，mask = capacity - 1
@@ -112,6 +136,8 @@ private:
 
     size_t maxFileSize;        // 触发轮转的大小
     std::time_t fileStartTime; // 当前文件开始时间
+    std::atomic<uint64_t> acceptedCount; // 入队成功计数
+    std::atomic<uint64_t> droppedCount;  // 丢弃计数
 };
 
 // -----------------------------------------------------------------------------

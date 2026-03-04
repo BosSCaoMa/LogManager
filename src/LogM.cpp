@@ -6,12 +6,70 @@
 #include <filesystem>
 #include <iomanip>
 #include <cstring>
+#include <cstdlib>
 #include <vector>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 using namespace std;
+
+#ifndef LOGM_PROJECT_DIR
+#define LOGM_PROJECT_DIR "."
+#endif
+
+static bool isBuildLikeDir(const std::filesystem::path& dir) {
+    std::string name = dir.filename().string();
+    return name == "build" || name == "bin" || name.rfind("cmake-build", 0) == 0;
+}
+
+static std::filesystem::path getExecutableDir() {
+#ifdef _WIN32
+    char modulePath[MAX_PATH] = {0};
+    DWORD len = GetModuleFileNameA(nullptr, modulePath, MAX_PATH);
+    if (len > 0) {
+        return std::filesystem::path(modulePath).parent_path();
+    }
+    return {};
+#else
+    char buf[4096] = {0};
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len > 0) {
+        buf[len] = '\0';
+        return std::filesystem::path(buf).parent_path();
+    }
+    return {};
+#endif
+}
+
+static std::string resolveDefaultLogFilePath() {
+    const char* envLogDir = std::getenv("LOGM_LOG_DIR");
+    if (envLogDir != nullptr && envLogDir[0] != '\0') {
+        return (std::filesystem::path(envLogDir) / "app.log").string();
+    }
+
+    std::filesystem::path rootDir;
+    std::filesystem::path configuredRoot(LOGM_PROJECT_DIR);
+    std::error_code ec;
+    if (!configuredRoot.empty() && configuredRoot != "." && std::filesystem::exists(configuredRoot, ec)) {
+        rootDir = configuredRoot;
+    }
+
+    if (rootDir.empty()) {
+        std::filesystem::path exeDir = getExecutableDir();
+        if (!exeDir.empty()) {
+            rootDir = isBuildLikeDir(exeDir) && exeDir.has_parent_path() ? exeDir.parent_path() : exeDir;
+        }
+    }
+
+    if (rootDir.empty()) {
+        rootDir = std::filesystem::current_path();
+    }
+
+    return (rootDir / "log" / "app.log").string();
+}
 
 // 帮助函数：保证路径存在
 static void ensurePath(const std::string& filePath) {
@@ -33,28 +91,18 @@ LogM &LogM::getInstance() {
 
 LogM::LogM() :
     currentLevel(LOGM_INFO),
+    capacityMask(0),
+    head(0),
+    tail(0),
     queueCapacity(8192),
     dropPolicy(DropPolicy::DROP_CURRENT),
     enableConsole(true),
     stopFlag(false),
     maxFileSize(5 * 1024 * 1024), // 默认 5MB
     fileStartTime(std::time(nullptr)),
-    head(0),
-    tail(0),
-    capacityMask(0) {
-#ifdef _WIN32
-    char modulePath[MAX_PATH] = {0};
-    DWORD len = GetModuleFileNameA(nullptr, modulePath, MAX_PATH);
-    if (len > 0) {
-        std::filesystem::path exePath(modulePath);
-        auto exeDir = exePath.parent_path();
-        logFilePath = (exeDir / "log" / "app.log").string();
-    } else {
-        logFilePath = "log/app.log"; // 退化方案
-    }
-#else
-    logFilePath = "./log/app.log";
-#endif
+    acceptedCount(0),
+    droppedCount(0) {
+    logFilePath = resolveDefaultLogFilePath();
     ensurePath(logFilePath);
     openFileUnlocked();
     startWriter();
@@ -83,6 +131,8 @@ void LogM::init(const LogConfig& cfg) {
     ring.resize(queueCapacity);
     head.store(0, std::memory_order_relaxed);
     tail.store(0, std::memory_order_relaxed);
+    acceptedCount.store(0, std::memory_order_relaxed);
+    droppedCount.store(0, std::memory_order_relaxed);
     stopFlag.store(false, std::memory_order_relaxed);
     startWriter();
 }
@@ -184,6 +234,7 @@ bool LogM::enqueue(std::string&& line) {
         size_t h = head.load(std::memory_order_acquire);
         if (t - h >= queueCapacity) {
             if (dropPolicy == DropPolicy::DROP_CURRENT) {
+                droppedCount.fetch_add(1, std::memory_order_relaxed);
                 return false;
             } else {
                 // 丢最旧，前移 head
@@ -193,6 +244,7 @@ bool LogM::enqueue(std::string&& line) {
                 }
                 size_t idx = h & capacityMask;
                 ring[idx].ready.store(false, std::memory_order_release);
+                droppedCount.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
         }
@@ -200,6 +252,7 @@ bool LogM::enqueue(std::string&& line) {
             size_t idx = t & capacityMask;
             ring[idx].data = std::move(line);
             ring[idx].ready.store(true, std::memory_order_release);
+            acceptedCount.fetch_add(1, std::memory_order_relaxed);
             queueCv.notify_one();
             return true;
         }
@@ -210,6 +263,10 @@ bool LogM::enqueue(std::string&& line) {
 void LogM::writerLoop() {
     std::vector<std::string> batch;
     batch.reserve(256);
+    size_t pendingFlushLines = 0;
+    auto lastFlushTime = std::chrono::steady_clock::now();
+    constexpr size_t kFlushLineThreshold = 1024;
+    constexpr auto kFlushInterval = std::chrono::milliseconds(100);
     while (true) {
         { // 用条件变量睡眠，避免空转
             std::unique_lock<std::mutex> lk(waitMutex);
@@ -253,6 +310,7 @@ void LogM::writerLoop() {
         for (auto &line : batch) {
             if (logFile.is_open()) {
                 logFile << line << '\n';
+                ++pendingFlushLines;
             }
             if (enableConsole) {
                 std::fputs(line.c_str(), stdout);
@@ -260,7 +318,15 @@ void LogM::writerLoop() {
             }
         }
         if (logFile.is_open()) {
-            logFile.flush(); // 系统调用。把缓冲区里的数据立刻写到文件（或 stdout）底层，确保已写入的日志落盘或输出
+            auto now = std::chrono::steady_clock::now();
+            bool flushByCount = pendingFlushLines >= kFlushLineThreshold;
+            bool flushByTime = (now - lastFlushTime) >= kFlushInterval;
+            bool flushByStop = stopFlag.load(std::memory_order_relaxed);
+            if (flushByCount || flushByTime || flushByStop) {
+                logFile.flush();
+                pendingFlushLines = 0;
+                lastFlushTime = now;
+            }
         }
         batch.clear();
 
@@ -268,6 +334,11 @@ void LogM::writerLoop() {
             head.load(std::memory_order_acquire) >= tail.load(std::memory_order_acquire)) {
             break;
         }
+    }
+
+    std::lock_guard<std::mutex> lk(cfgMutex);
+    if (logFile.is_open()) {
+        logFile.flush();
     }
 }
 

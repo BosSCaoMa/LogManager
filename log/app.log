@@ -1,0 +1,2 @@
+[2026-03-04 20:56:23.837573][INFO][tid:1672125552301359834][/home/ubuntu/code/LogManager/main.cpp:12 main] This is an info message
+[2026-03-04 20:56:23.837643][ERROR][tid:1672125552301359834][/home/ubuntu/code/LogManager/main.cpp:13 main] This is an error message, something went wrong
