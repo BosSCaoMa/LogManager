@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <cstring>
+#include <vector>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -32,8 +33,15 @@ LogM &LogM::getInstance() {
 
 LogM::LogM() :
     currentLevel(LOGM_INFO),
+    queueCapacity(8192),
+    dropPolicy(DropPolicy::DROP_CURRENT),
+    enableConsole(true),
+    stopFlag(false),
     maxFileSize(5 * 1024 * 1024), // 默认 5MB
-    fileStartTime(std::time(nullptr)) {
+    fileStartTime(std::time(nullptr)),
+    head(0),
+    tail(0),
+    capacityMask(0) {
 #ifdef _WIN32
     char modulePath[MAX_PATH] = {0};
     DWORD len = GetModuleFileNameA(nullptr, modulePath, MAX_PATH);
@@ -48,19 +56,43 @@ LogM::LogM() :
     logFilePath = "./log/app.log";
 #endif
     ensurePath(logFilePath);
-    // 预创建文件（可选）
-    try { std::ofstream ofs(logFilePath, std::ios::app); } catch(...) {}
+    openFileUnlocked();
+    startWriter();
 }
 
 LogM::~LogM() {
-    // 无持久句柄需要关闭
+    shutdown();
+}
+
+void LogM::init(const LogConfig& cfg) {
+    std::lock_guard<std::mutex> lk(cfgMutex);
+    currentLevel.store(cfg.level, std::memory_order_relaxed);
+    if (!cfg.filePath.empty()) {
+        logFilePath = cfg.filePath;
+    }
+    maxFileSize = cfg.maxFileSize;
+    queueCapacity = std::max<size_t>(64, cfg.queueCapacity);
+    dropPolicy = cfg.dropPolicy;
+    enableConsole = cfg.enableConsole;
+    ensurePath(logFilePath);
+    openFileUnlocked();
+    size_t cap = std::max<size_t>(64, cfg.queueCapacity);
+    queueCapacity = nextPow2(cap);
+    capacityMask = queueCapacity - 1;
+    ring.clear();
+    ring.resize(queueCapacity);
+    head.store(0, std::memory_order_relaxed);
+    tail.store(0, std::memory_order_relaxed);
+    stopFlag.store(false, std::memory_order_relaxed);
+    startWriter();
 }
 
 void LogM::setLogFile(const std::string& path) {
-    std::lock_guard<std::mutex> lk(logMutex);
+    std::lock_guard<std::mutex> lk(cfgMutex);
     logFilePath = path;
     ensurePath(logFilePath);
     fileStartTime = std::time(nullptr); // 更换文件重新计时
+    openFileUnlocked();
 }
 
 const char* LogM::levelToStr(LogLevel level) {
@@ -108,8 +140,135 @@ void LogM::rotateIfNeeded(std::time_t now_c) {
     }
 
     // 创建新的文件
-    try { std::ofstream ofs(logFilePath, std::ios::app); } catch(...) {}
+    openFileUnlocked();
     fileStartTime = now_c; // 更新开始时间
+}
+
+void LogM::openFileUnlocked() {
+    if (logFile.is_open()) {
+        logFile.close();
+    }
+    ensurePath(logFilePath);
+    try {
+        logFile.open(logFilePath, std::ios::app);
+    } catch(...) {}
+}
+
+size_t LogM::nextPow2(size_t v) const {
+    if (v == 0) return 1;
+    v--; v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16; v |= v >> 32;
+    return v + 1;
+}
+
+void LogM::startWriter() {
+    if (writerThread.joinable()) return; // 只启动一次
+    writerThread = std::thread(&LogM::writerLoop, this);
+}
+
+void LogM::shutdown() {
+    bool expected = false;
+    if (!stopFlag.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+        // 已经关闭
+    }
+    queueCv.notify_all();
+    if (writerThread.joinable()) {
+        writerThread.join();
+    }
+    std::lock_guard<std::mutex> lk(cfgMutex);
+    if (logFile.is_open()) logFile.close();
+}
+
+bool LogM::enqueue(std::string&& line) {
+    while (true) {
+        size_t t = tail.load(std::memory_order_relaxed);
+        size_t h = head.load(std::memory_order_acquire);
+        if (t - h >= queueCapacity) {
+            if (dropPolicy == DropPolicy::DROP_CURRENT) {
+                return false;
+            } else {
+                // 丢最旧，前移 head
+                size_t newH = h + 1;
+                if (!head.compare_exchange_weak(h, newH, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                    continue;
+                }
+                size_t idx = h & capacityMask;
+                ring[idx].ready.store(false, std::memory_order_release);
+                continue;
+            }
+        }
+        if (tail.compare_exchange_weak(t, t + 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            size_t idx = t & capacityMask;
+            ring[idx].data = std::move(line);
+            ring[idx].ready.store(true, std::memory_order_release);
+            queueCv.notify_one();
+            return true;
+        }
+    }
+}
+
+/*等 → 取 → 写 → 退出判断*/
+void LogM::writerLoop() {
+    std::vector<std::string> batch;
+    batch.reserve(256);
+    while (true) {
+        { // 用条件变量睡眠，避免空转
+            std::unique_lock<std::mutex> lk(waitMutex);
+            /* 这里 wait 只靠 head < tail 判断“有数据”，但真正能不能取，还要看每个槽位 s.ready */
+            queueCv.wait(lk, [this]{
+                return stopFlag.load(std::memory_order_relaxed) ||
+                    head.load(std::memory_order_acquire) < tail.load(std::memory_order_acquire);
+            });
+        }
+
+        // 批量取出数据
+        while (batch.size() < 256) {
+            size_t h = head.load(std::memory_order_relaxed);
+            size_t t = tail.load(std::memory_order_acquire);
+            if (h >= t) break;
+            size_t idx = h & capacityMask;
+            Slot &s = ring[idx];
+
+            /* 为什么既要 head/tail，又要 s.ready？
+            tail 表示“已经预定/提交了多少条日志位置”（常见做法是生产者先拿到一个序号，写数据，再设置 ready）
+            但生产者可能已经把 tail 往前推进了，slot 数据还没写完或没标记完成。
+            所以消费者要检查 s.ready：只有 ready 才能安全 move 数据。 */
+            if (!s.ready.load(std::memory_order_acquire)) break;
+            batch.push_back(std::move(s.data)); // string的 move 语义，避免复制
+            s.ready.store(false, std::memory_order_release);
+            head.store(h + 1, std::memory_order_release);
+        }
+
+        if (batch.empty()) {
+            if (stopFlag.load(std::memory_order_relaxed) &&
+                head.load(std::memory_order_acquire) >= tail.load(std::memory_order_acquire)) {
+                break;
+            }
+            continue;
+        }
+
+        // 写入阶段：加配置锁，可能 rotate，然后写文件/控制台
+        std::time_t now_c = std::time(nullptr);
+        std::lock_guard<std::mutex> lk(cfgMutex); // 保护配置与文件句柄（比如 logFile 的切换/滚动、enableConsole 等），避免其他线程修改配置时和写线程冲突
+        rotateIfNeeded(now_c);
+        for (auto &line : batch) {
+            if (logFile.is_open()) {
+                logFile << line << '\n';
+            }
+            if (enableConsole) {
+                std::fputs(line.c_str(), stdout);
+                std::fputc('\n', stdout);
+            }
+        }
+        if (logFile.is_open()) {
+            logFile.flush(); // 系统调用。把缓冲区里的数据立刻写到文件（或 stdout）底层，确保已写入的日志落盘或输出
+        }
+        batch.clear();
+
+        if (stopFlag.load(std::memory_order_relaxed) &&
+            head.load(std::memory_order_acquire) >= tail.load(std::memory_order_acquire)) {
+            break;
+        }
+    }
 }
 
 void LogM::log(LogLevel level,
@@ -147,15 +306,5 @@ void LogM::log(LogLevel level,
         << message;
 
     std::string outLine = oss.str();
-
-    std::lock_guard<std::mutex> lock(logMutex);
-    // 写之前检查轮转
-    rotateIfNeeded(now_c);
-
-    std::ofstream logFile(logFilePath, std::ios::app);
-    if (logFile) {
-        logFile << outLine << std::endl;
-    } else {
-        std::fprintf(stderr, "%s\n", outLine.c_str());
-    }
+    enqueue(std::move(outLine));
 }

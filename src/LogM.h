@@ -17,6 +17,9 @@
 #include <atomic>
 #include <thread>
 #include <cstring>
+#include <fstream>
+#include <condition_variable>
+#include <vector>
 // 日志级别
 enum LogLevel {
     LOGM_DEBUG = 0,
@@ -25,10 +28,30 @@ enum LogLevel {
     LOGM_ERROR = 3
 };
 
+// 队列满时的策略
+enum class DropPolicy {
+    DROP_CURRENT, // 丢弃当前条目
+    DROP_OLDEST   // 丢弃最旧条目腾出空间
+};
+
+struct LogConfig {
+    LogLevel level = LOGM_INFO;
+    std::string filePath;          // 默认构造后在实现中设置
+    size_t maxFileSize = 5 * 1024 * 1024; // 5MB
+    size_t queueCapacity = 8192;   // 环形队列容量
+    DropPolicy dropPolicy = DropPolicy::DROP_CURRENT;
+    bool enableConsole = true;     // 是否同时输出到控制台
+};
+
 // 添加 LOGM_API 导出类符号
 class LOGM_API LogM {
 public:
     static LogM& getInstance();
+
+    // 初始化配置（需在多线程写日志前调用一次）
+    void init(const LogConfig& cfg);
+    // 优雅停机（可选调用；析构会自动调用）
+    void shutdown();
 
     // 已格式化消息入口（线程安全）
     void log(LogLevel level,
@@ -60,13 +83,35 @@ private:
 
     // 轮转检查（在持锁状态下调用）
     void rotateIfNeeded(std::time_t now_c);
+    void openFileUnlocked();
+    void writerLoop();
+    void startWriter();
+    bool enqueue(std::string&& line);
+    size_t nextPow2(size_t v) const;
 
     std::atomic<LogLevel> currentLevel; // 原子，避免竞态
     std::string logFilePath;
-    std::mutex logMutex; // 保护文件写
+    std::mutex cfgMutex; // 保护文件句柄与轮转参数
+    std::ofstream logFile;
+    std::condition_variable queueCv;
+    std::mutex waitMutex; // 仅用于条件变量等待，不保护队列数据
 
-    size_t maxFileSize;          // 触发轮转的大小
-    std::time_t fileStartTime;   // 当前文件开始时间
+    struct Slot {
+        std::atomic<bool> ready{false};
+        std::string data;
+    };
+    std::vector<Slot> ring;
+    size_t capacityMask; // 容量为 2^n，mask = capacity - 1
+    std::atomic<size_t> head; // 消费位置
+    std::atomic<size_t> tail; // 生产位置
+    size_t queueCapacity;
+    DropPolicy dropPolicy;
+    bool enableConsole;
+    std::atomic<bool> stopFlag;
+    std::thread writerThread;
+
+    size_t maxFileSize;        // 触发轮转的大小
+    std::time_t fileStartTime; // 当前文件开始时间
 };
 
 // -----------------------------------------------------------------------------
