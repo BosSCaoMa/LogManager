@@ -6,7 +6,8 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
-
+#include <cstring> // std::strlen / std::strcat
+#include <ctime>   // std::time_t
 // 日志级别
 enum LogLevel {
     DEBUG = 0,
